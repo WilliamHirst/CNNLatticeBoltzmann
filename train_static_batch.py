@@ -7,6 +7,10 @@ import torch.optim as optim
 from animate import animate_flow
 import random
 
+"""
+THIS SCRIPT WAS ABANDONED.
+"""
+
 
 class FluidDataset(Dataset):
     def __init__(self, X, Y):
