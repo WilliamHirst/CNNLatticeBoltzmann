@@ -6,15 +6,15 @@ class GenerateFlowData:
     def __init__(
         self,
         box,
-        speed_range,
-        visocity_range,
+        velocity_range,
+        viscosity_range,
         use_curl=True,
         num_samples=32,
         num_timeframes=100,
     ):
         self.height, self.width = box
-        self.min_speed, self.max_speed = speed_range
-        self.min_viscosity, self.max_viscosity = visocity_range
+        self.min_speed, self.max_speed = velocity_range
+        self.min_viscosity, self.max_viscosity = viscosity_range
         self.barrier = np.zeros((self.height, self.width), bool)
         self.shape_type = "line"  # ['line', 'square', 'triangle', 'circle']
 

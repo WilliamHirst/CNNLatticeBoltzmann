@@ -29,7 +29,7 @@ print("Running on", device)
 use_curl = True  # Determines whether to use curl-based representation
 
 gfd = GenerateFlowData(
-    domain_size=(40, 80),  # Grid dimensions
+    box=(40, 80),  # Grid dimensions
     velocity_range=(0.08, 0.12),  # Velocity magnitude range
     viscosity_range=(0.004, 0.02),  # Viscosity range
     use_curl=use_curl,
