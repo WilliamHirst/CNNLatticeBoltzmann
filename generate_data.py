@@ -3,7 +3,15 @@ import random
 
 
 class GenerateFlowData:
-    def __init__(self, box, speed_range, visocity_range):
+    def __init__(
+        self,
+        box,
+        speed_range,
+        visocity_range,
+        use_curl=True,
+        num_samples=32,
+        num_timeframes=100,
+    ):
         self.height, self.width = box
         self.min_speed, self.max_speed = speed_range
         self.min_viscosity, self.max_viscosity = visocity_range
@@ -13,8 +21,10 @@ class GenerateFlowData:
         self.four9ths = 4.0 / 9.0
         self.one9th = 1.0 / 9.0
         self.one36th = 1.0 / 36.0
-        self.timeframes = 200
-        self.num_samples = 32
+        self.timeframes = num_timeframes
+        self.num_samples = num_samples
+        self.num_channels = 4 if use_curl else 5
+        self.use_curl = use_curl
 
         self.stream_direction = {
             "N": (0, 1),  # "N" corresponds to roll in the x-axis (rows)
@@ -37,143 +47,170 @@ class GenerateFlowData:
             "SW": "NE",
         }
 
-    def get_dataset(self):
+    def get_dataset(self, normalize=True):
         X = np.zeros(
-            (self.num_samples, self.timeframes, self.height, self.width, 4)
+            (
+                self.num_samples * self.timeframes,
+                self.num_channels,
+                self.height,
+                self.width,
+            )
         )  # (samples, timeframes, height, width, 4)
         Y = np.zeros(
-            (self.num_samples, self.timeframes, self.height, self.width, 2)
+            (
+                self.num_samples * self.timeframes,
+                1 if self.use_curl else 2,
+                self.height,
+                self.width,
+            )
         )  # (samples, timeframes, height, width, 2)
 
         for i in range(self.num_samples):
             X_sample, Y_sample = self.gen_X_and_Y()
-            X[i] = X_sample
-            Y[i] = Y_sample
+            X[i * self.timeframes : (i + 1) * self.timeframes] = X_sample
+            Y[i * self.timeframes : (i + 1) * self.timeframes] = Y_sample
+        if normalize:
+            X, Y = self.normalize(X, Y)
+        if self.use_curl:
+            Y = Y[:, 0]
         return X, Y
 
     def gen_X_and_Y(self):
         # Generate random barrier and direction
-        barrier, barrier_direction = self.generate_random_barrier()
+        barrier = self.generate_random_barrier()
+        # Assuming barrier is a NumPy array
+        barrier = np.expand_dims(barrier, axis=[0, 1])  # equivalent to unsqueeze(0)
+        barrier = np.repeat(barrier, self.timeframes, axis=0)
 
-        # Randomly select viscosity and flow speed
+        # Randomly select viscosity and flow speped
         u0 = random.uniform(self.min_speed, self.max_speed)
         visc = random.uniform(self.min_viscosity, self.max_viscosity)
 
-        viscosity = np.full(
-            (self.height, self.width),
-            visc,
-        )
-        speed = np.full((self.height, self.width), u0)
-
-        # Generate timestep layer (constant across the grid)
-        timestep_layer = np.full(
-            (self.height, self.width), 0
-        )  # Assuming timestep 0 for the initial state
-
-        # Stack the input features (barrier, viscosity, speed, timestep) along the last axis
-        X = np.stack(
-            [barrier, viscosity, speed, timestep_layer], axis=-1
-        )  # Shape: (height, width, 4)
+        # Create constant layers over timesteps
+        viscosity = np.full((self.timeframes, 1, self.height, self.width), visc)
+        speed = np.full((self.timeframes, 1, self.height, self.width), u0)
 
         # Calculate omega from viscosity
         omega = 1 / (3 * visc + 0.5)
 
         # Generate the simulation results (density and velocity fields) for each time step
-        Y = self.sample(barrier, barrier_direction, omega, u0)
+        Y = self.sample(omega, u0)
+        X = np.concatenate(
+            [barrier, viscosity, speed, Y[:-1]], axis=1
+        )  # Shape: (height, width, 4)
+        Y = Y[1:]
 
         # Stack the output fields (velocity and density fields) for each time step
         return X, Y
 
-    def sample(self, barrier, barrier_direction, omega, u0):
+    def sample(self, omega, u0):
         n, rho, ux, uy = self.initialize_arrays(u0)
-        Curl = np.zeros((self.timeframes, self.height, self.width))
-        for i in range(self.timeframes * 10):
-            n = self.stream(n, barrier, barrier_direction)
-            n, rho, ux, uy = self.collide(n, rho, ux, uy, omega, u0)
-            Curl[int(i / 10)] = self.curl(ux, uy)
-            if i % 10 == 0 and i:
-                exit()
-        return Curl
+        Curl = np.zeros((self.timeframes + 1, 1, self.height, self.width))
+        U = np.zeros((self.timeframes + 1, 2, self.height, self.width))
+        sample_freq = 80
+        for i in range((self.timeframes + 1) * sample_freq):
+            n = self.stream(n)
+            ux, uy, rho = self.collide(omega, u0)
+            if sample_freq % sample_freq == 0:
+                if self.use_curl:
+                    Curl[int(i / sample_freq)] = self.curl(ux, uy)
+                else:
+                    U[int(i / sample_freq), 0] = ux
+                    U[int(i / sample_freq), 1] = uy
+        if self.use_curl:
+            return Curl
+        else:
+            return U
 
     # Stream function
-    def stream(self, n, barrier, barrier_direction):
-        for key, (axis, shift) in self.stream_direction.items():
-            n[key] = np.roll(n[key], shift, axis=axis)
+    def stream(self, n):
+
+        self.nN = np.roll(self.nN, 1, axis=0)
+        self.nNE = np.roll(self.nNE, 1, axis=0)
+        self.nNW = np.roll(self.nNW, 1, axis=0)
+        self.nS = np.roll(self.nS, -1, axis=0)
+        self.nSE = np.roll(self.nSE, -1, axis=0)
+        self.nSW = np.roll(self.nSW, -1, axis=0)
+        self.nE = np.roll(self.nE, 1, axis=1)
+        self.nNE = np.roll(self.nNE, 1, axis=1)
+        self.nSE = np.roll(self.nSE, 1, axis=1)
+        self.nW = np.roll(self.nW, -1, axis=1)
+        self.nNW = np.roll(self.nNW, -1, axis=1)
+        self.nSW = np.roll(self.nSW, -1, axis=1)
 
         # Bounce-back boundary conditions
-        for key, opposite_key in self.barrier_bounces.items():
-            n[key][barrier_direction[key]] = n[opposite_key][barrier]
-        return n
+        self.nN[self.barrierN] = self.nS[self.barrier]
+        self.nS[self.barrierS] = self.nN[self.barrier]
+        self.nE[self.barrierE] = self.nW[self.barrier]
+        self.nW[self.barrierW] = self.nE[self.barrier]
+        self.nNE[self.barrierNE] = self.nSW[self.barrier]
+        self.nNW[self.barrierNW] = self.nSE[self.barrier]
+        self.nSE[self.barrierSE] = self.nNW[self.barrier]
+        self.nSW[self.barrierSW] = self.nNE[self.barrier]
 
     # Collide function
-    def collide(self, n, rho, ux, uy, omega, u0):
-        print("ux", ux)
-        print("uy", uy)
-        # Calculate rho, ux, uy, and other parameters
-        rho = np.sum(
-            n[dir] for dir in ["0", "N", "S", "E", "W", "NE", "NW", "SE", "SW"]
-        )
-        rho = np.maximum(rho, 1e-3)  # Ensures no division by zero
+    def collide(self, omega, u0):
 
-        ux = (n["E"] + n["NE"] + n["SE"] - n["W"] - n["NW"] - n["SW"]) / rho
-        uy = (n["N"] + n["NE"] + n["NW"] - n["S"] - n["SE"] - n["SW"]) / rho
-        ux = np.clip(ux, -1.0, 1.0)
-        uy = np.clip(uy, -1.0, 1.0)
+        rho = (
+            self.n0
+            + self.nN
+            + self.nS
+            + self.nE
+            + self.nW
+            + self.nNE
+            + self.nSE
+            + self.nNW
+            + self.nSW
+        )
+        ux = (self.nE + self.nNE + self.nSE - self.nW - self.nNW - self.nSW) / rho
+        uy = (self.nN + self.nNE + self.nNW - self.nS - self.nSE - self.nSW) / rho
         ux2 = ux * ux
         uy2 = uy * uy
         u2 = ux2 + uy2
-        u02 = u0**2
-        u_ineer = 3 * u0 + 3 * u02
-
         omu215 = 1 - 1.5 * u2
         uxuy = ux * uy
-
-        # Update the n variables using the Bhatnagar–Gross–Krook (BGK) update rule
-        n["0"] = (1 - omega) * n["0"] + omega * self.four9ths * rho * omu215
-        n["N"] = (1 - omega) * n["N"] + omega * self.one9th * rho * (
+        self.n0 = (1 - omega) * self.n0 + omega * self.four9ths * rho * omu215
+        self.nN = (1 - omega) * self.nN + omega * self.one9th * rho * (
             omu215 + 3 * uy + 4.5 * uy2
         )
-        n["S"] = (1 - omega) * n["S"] + omega * self.one9th * rho * (
+        self.nS = (1 - omega) * self.nS + omega * self.one9th * rho * (
             omu215 - 3 * uy + 4.5 * uy2
         )
-        n["E"] = (1 - omega) * n["E"] + omega * self.one9th * rho * (
+        self.nE = (1 - omega) * self.nE + omega * self.one9th * rho * (
             omu215 + 3 * ux + 4.5 * ux2
         )
-        n["W"] = (1 - omega) * n["W"] + omega * self.one9th * rho * (
+        self.nW = (1 - omega) * self.nW + omega * self.one9th * rho * (
             omu215 - 3 * ux + 4.5 * ux2
         )
-        n["NE"] = (1 - omega) * n["NE"] + omega * self.one36th * rho * (
+        self.nNE = (1 - omega) * self.nNE + omega * self.one36th * rho * (
             omu215 + 3 * (ux + uy) + 4.5 * (u2 + 2 * uxuy)
         )
-        n["NW"] = (1 - omega) * n["NW"] + omega * self.one36th * rho * (
+        self.nNW = (1 - omega) * self.nNW + omega * self.one36th * rho * (
             omu215 + 3 * (-ux + uy) + 4.5 * (u2 - 2 * uxuy)
         )
-        n["SE"] = (1 - omega) * n["SE"] + omega * self.one36th * rho * (
+        self.nSE = (1 - omega) * self.nSE + omega * self.one36th * rho * (
             omu215 + 3 * (ux - uy) + 4.5 * (u2 - 2 * uxuy)
         )
-        n["SW"] = (1 - omega) * n["SW"] + omega * self.one36th * rho * (
+        self.nSW = (1 - omega) * self.nSW + omega * self.one36th * rho * (
             omu215 + 3 * (-ux - uy) + 4.5 * (u2 + 2 * uxuy)
         )
-        for key in n.keys():
-            n[key] = np.clip(n[key], -1.0, 1.0)
 
-        # Apply boundary conditions for steady flow at the boundaries (force)
-        n["E"][:, 0] = self.one9th * (1 + u_ineer)
-        n["W"][:, 0] = self.one9th * (1 - u_ineer)
-        n["NE"][:, 0] = self.one36th * (1 + u_ineer)
-        n["SE"][:, 0] = self.one36th * (1 + u_ineer)
-        n["NW"][:, 0] = self.one36th * (1 - u_ineer)
-        n["SW"][:, 0] = self.one36th * (1 - u_ineer)
-
-        return n, rho, ux, uy
+        # Force steady flow at the boundaries
+        self.nE[:, 0] = self.one9th * (1 + 3 * u0 + 4.5 * u0**2 - 1.5 * u0**2)
+        self.nW[:, 0] = self.one9th * (1 - 3 * u0 + 4.5 * u0**2 - 1.5 * u0**2)
+        self.nNE[:, 0] = self.one36th * (1 + 3 * u0 + 4.5 * u0**2 - 1.5 * u0**2)
+        self.nSE[:, 0] = self.one36th * (1 + 3 * u0 + 4.5 * u0**2 - 1.5 * u0**2)
+        self.nNW[:, 0] = self.one36th * (1 - 3 * u0 + 4.5 * u0**2 - 1.5 * u0**2)
+        self.nSW[:, 0] = self.one36th * (1 - 3 * u0 + 4.5 * u0**2 - 1.5 * u0**2)
+        return ux, uy, rho
 
     # Calculate curl
     def curl(self, ux, uy):
         return (
-            np.roll(uy, -1, axis=1)
-            - np.roll(uy, 1, axis=1)
-            - np.roll(ux, -1, axis=0)
-            + np.roll(ux, 1, axis=0)
+            np.roll(uy, -1, axis=-1)
+            - np.roll(uy, 1, axis=-1)
+            - np.roll(ux, -1, axis=-2)
+            + np.roll(ux, 1, axis=-2)
         )
 
     def initialize_arrays(self, u0):
@@ -181,52 +218,66 @@ class GenerateFlowData:
         n = {}
         # Initialize arrays
         u02 = u0**2
-        n["0"] = self.four9ths * (ones - 1.5 * u02)
-        n["N"] = self.one9th * (ones - 1.5 * u02)
-        n["S"] = self.one9th * (ones - 1.5 * u02)
-        n["E"] = self.one9th * (ones + 3 * u0 + 3.0 * u02)
-        n["W"] = self.one9th * (ones - 3 * u0 + 3.0 * u02)
-        n["NE"] = self.one36th * (ones + 3 * u0 + 3.0 * u02)
-        n["SE"] = self.one36th * (ones + 3 * u0 + 3.0 * u02)
-        n["NW"] = self.one36th * (ones - 3 * u0 + 3.0 * u02)
-        n["SW"] = self.one36th * (ones - 3 * u0 + 3.0 * u02)
-        rho = sum(n[dir] for dir in ["0", "N", "S", "E", "W", "NE", "NW", "SE", "SW"])
-        ux = (n["E"] + n["NE"] + n["SE"] - n["W"] - n["NW"] - n["SW"]) / rho
-        uy = (n["N"] + n["NE"] + n["NW"] - n["S"] - n["SE"] - n["SW"]) / rho
+        self.n0 = self.four9ths * (ones - 1.5 * u02)
+        self.nN = self.one9th * (ones - 1.5 * u02)
+        self.nS = self.one9th * (ones - 1.5 * u02)
+        self.nE = self.one9th * (ones + 3 * u0 + 3.0 * u02)
+        self.nW = self.one9th * (ones - 3 * u0 + 3.0 * u02)
+        self.nNE = self.one36th * (ones + 3 * u0 + 3.0 * u02)
+        self.nSE = self.one36th * (ones + 3 * u0 + 3.0 * u02)
+        self.nNW = self.one36th * (ones - 3 * u0 + 3.0 * u02)
+        self.nSW = self.one36th * (ones - 3 * u0 + 3.0 * u02)
+        rho = (
+            self.n0
+            + self.nN
+            + self.nS
+            + self.nE
+            + self.nW
+            + self.nNE
+            + self.nSE
+            + self.nNW
+            + self.nSW
+        )
+        ux = (self.nE + self.nNE + self.nSE - self.nW - self.nNW - self.nSW) / rho
+        uy = (self.nN + self.nNE + self.nNW - self.nS - self.nSE - self.nSW) / rho
         return n, rho, ux, uy
 
     def generate_random_barrier(self):
         # Clear the grid (start with no obstacles)
         barrier = np.zeros((self.height, self.width), bool)
-        """
-        shape_type = self.shape_type
-        # Choose a random shape type
 
-            # Generate a random straight line
+        # Generate a random straight line
         length = np.random.normal(
             loc=10, scale=3
         )  # Random length (normal distribution)
-        length = max(4, int(length))  # Ensure length is at least 1
-        x = random.randint(0, self.width - 1)
-        y = random.randint(0, self.height - 1)
-        if y + length <= self.height:
-            barrier[y : y + length, x] = 1"""
-        # self.height // 2
-        barrier = np.zeros((self.height, self.width), bool)
-        barrier[(self.height // 2) - 8 : (self.height // 2) + 8, 1] = True
-
-        barrier_direction = {}
-
-        barrier_direction["N"] = np.roll(barrier, 1, axis=0)
-        barrier_direction["S"] = np.roll(barrier, -1, axis=0)
-        barrier_direction["E"] = np.roll(barrier, 1, axis=1)
-        barrier_direction["W"] = np.roll(barrier, -1, axis=1)
-        barrier_direction["NE"] = np.roll(barrier_direction["N"], 1, axis=1)
-        barrier_direction["NW"] = np.roll(barrier_direction["N"], -1, axis=1)
-        barrier_direction["SE"] = np.roll(barrier_direction["S"], 1, axis=1)
-        barrier_direction["SW"] = np.roll(barrier_direction["S"], -1, axis=1)
+        length = max(4, int(length))  # Ensure length is at least 4
+        x = random.randint(int(self.width / 2) - 20, int(self.width / 2) - 10)
+        y = random.randint(5, self.height - length - 5)
+        barrier[y : y + length, x] = 1
         self.barrier = barrier
-        return barrier, barrier_direction
+
+        self.barrierN = np.roll(self.barrier, 1, axis=0)
+        self.barrierS = np.roll(self.barrier, -1, axis=0)
+        self.barrierE = np.roll(self.barrier, 1, axis=1)
+        self.barrierW = np.roll(self.barrier, -1, axis=1)
+        self.barrierNE = np.roll(self.barrierN, 1, axis=1)
+        self.barrierNW = np.roll(self.barrierN, -1, axis=1)
+        self.barrierSE = np.roll(self.barrierS, 1, axis=1)
+        self.barrierSW = np.roll(self.barrierS, -1, axis=1)
+        return self.barrier
+
+    def normalize(self, X, Y):
+        # Calculate mean and std per channel (dim=0 excludes batch dimension)
+        self.mean_X = X.mean(axis=(0, 2, 3), keepdims=True)  # Mean per channel
+        self.std_X = X.std(axis=(0, 2, 3), keepdims=True)  # Std per channel
+
+        self.mean_Y = Y.mean(axis=(0, 2, 3), keepdims=True)  # Mean per channel
+        self.std_Y = Y.std(axis=(0, 2, 3), keepdims=True)  # Std per channel
+
+        # Normalize by subtracting the mean and dividing by the std
+        normalized_X = (X - self.mean_X) / self.std_X
+        normalized_Y = (Y - self.mean_Y) / self.std_Y
+        return normalized_X, normalized_Y
 
 
 if __name__ == "__main__":
@@ -239,7 +290,7 @@ if __name__ == "__main__":
 
     for i in range(len(y)):
         fluidImage = plt.imshow(
-            y[i],
+            y[i * 10],
             origin="lower",
             norm=plt.Normalize(-0.1, 0.1),
             cmap=plt.get_cmap("jet"),
