@@ -13,5 +13,11 @@ This project leverages a Convolutional Neural Network (CNN) to simulate 2D visco
 
 ## Project Structure
 
-├── animate.py # Functions to animate fluid flow simulation results ├── generate_data.py # Generates training data using Lattice Boltzmann Method ├── models.py # FluidNet model definition ├── train.py # Main training script for FluidNet ├── flow_animationX.gif # Example of generated flow animations (GIFs) ├── fluid_model.pth # Saved model after training └── README.md # Project documentation
+- ** animate.py**: # Functions to animate fluid flow simulation results
+- ** generate_data.py**: # Generates training data using Lattice Boltzmann Method
+- ** models.py**: # FluidNet model definition
+- ** train.py**: # Main training script for FluidNet
+- ** flow_animationX.gif**: # Example of generated flow animations (GIFs)
+- ** fluid_model.pth**: # Saved model after training  
+- ** README.md**: # Project documentation
 
